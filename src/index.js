@@ -190,8 +190,45 @@ function safeJsonParse(text) {
   try { return JSON.parse(m[0]); } catch (_) { return null; }
 }
 
-function diagnostics(env) {
-  return json({ ok: true, service: 'astra-worker', has_key: Boolean(env.OPENAI_API_KEY), cloud_status: env.OPENAI_API_KEY ? 'configured' : 'missing_key', time: Date.now() });
+
+async function diagnostics(env, request) {
+  const url = new URL(request.url);
+  const probe = url.searchParams.get('probe') === '1';
+  const hasKey = Boolean(env.OPENAI_API_KEY);
+  const base = {
+    ok: true,
+    service: 'astra-worker',
+    backend_up: true,
+    has_key: hasKey,
+    cloud_ready: false,
+    time: Date.now(),
+  };
+  if (!probe || !hasKey) {
+    return json(base);
+  }
+  try {
+    const res = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: env.MODEL_NAME || 'gpt-4o-mini',
+        input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }],
+        max_output_tokens: 8,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return json({ ...base, cloud_ready: false, error_hint: text.slice(0, 160) });
+    }
+    const data = await res.json();
+    const out = String(data.output_text || '').trim();
+    return json({ ...base, cloud_ready: true, cloud_reply: out || 'ok' });
+  } catch (err) {
+    return json({ ...base, cloud_ready: false, error_hint: String(err?.message || err).slice(0, 160) });
+  }
 }
 
 function currentState(extra = {}) {
@@ -327,8 +364,8 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders() });
     try {
-      if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/diagnostics') return diagnostics(env);
-      if (url.pathname === '/state') return json(currentState());
+      if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/diagnostics') return diagnostics(env, request);
+      if (url.pathname === '/state') return json({ ok: true, state: currentState(), backend_up: true, has_key: Boolean(env.OPENAI_API_KEY) });
       const body = await parseBody(request);
       if (url.pathname === '/chat') return handleChat(env, body);
       if (url.pathname === '/vision') return handleVision(env, body);
