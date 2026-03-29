@@ -216,7 +216,7 @@ async function diagnostics(env, request) {
       body: JSON.stringify({
         model: env.MODEL_NAME || 'gpt-4o-mini',
         input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }],
-        max_output_tokens: 8,
+        max_output_tokens: 32,
       }),
     });
     if (!res.ok) {
