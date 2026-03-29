@@ -1,13 +1,12 @@
 
-function corsHeaders(request) {
-  const origin = request?.headers?.get?.('Origin') || '*';
-  const requestedHeaders = request?.headers?.get?.('Access-Control-Request-Headers');
+function corsHeaders(_request = null) {
   return {
-    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': requestedHeaders || 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Expose-Headers': 'Content-Type, Content-Length',
     'Access-Control-Max-Age': '86400',
-    'Vary': 'Origin, Access-Control-Request-Headers',
+    'Cache-Control': 'no-store',
   };
 }
 
@@ -431,21 +430,74 @@ async function handleSpeak(env, body) {
   });
 }
 
+async function parseBody(request) {
+  const contentType = request.headers.get('Content-Type') || '';
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const body = {};
+    for (const [k, v] of url.searchParams.entries()) {
+      try { body[k] = JSON.parse(v); } catch { body[k] = v; }
+    }
+    return body;
+  }
+  if (contentType.includes('application/json')) {
+    return await request.json();
+  }
+  if (
+    contentType.includes('application/x-www-form-urlencoded') ||
+    contentType.includes('multipart/form-data') ||
+    contentType.includes('text/plain')
+  ) {
+    try {
+      const fd = await request.formData();
+      const body = {};
+      for (const [k, v] of fd.entries()) {
+        const s = typeof v === 'string' ? v : '';
+        try { body[k] = JSON.parse(s); } catch { body[k] = s; }
+      }
+      return body;
+    } catch (_) {
+      const raw = await request.text();
+      const body = {};
+      for (const [k, v] of new URLSearchParams(raw).entries()) {
+        try { body[k] = JSON.parse(v); } catch { body[k] = v; }
+      }
+      return body;
+    }
+  }
+  const raw = await request.text();
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (_) {
+    const body = {};
+    for (const [k, v] of new URLSearchParams(raw).entries()) {
+      try { body[k] = JSON.parse(v); } catch { body[k] = v; }
+    }
+    return body;
+  }
+}
+
+function okService(request, env) {
+  return json({
+    ok: true,
+    service: 'astra-worker',
+    has_key: Boolean(env.OPENAI_API_KEY),
+    method: request.method,
+    time: Date.now(),
+  }, 200, request);
+}
+
 export default {
   async fetch(request, env) {
     env.__request = request;
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(request) });
-
     const url = new URL(request.url);
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(request) });
+    }
+
     try {
-      if (url.pathname === '/diagnostics') {
-        return json({
-          ok: true,
-          service: 'astra-worker',
-          origin: request.headers.get('Origin') || null,
-          has_key: Boolean(env.OPENAI_API_KEY),
-          method: request.method,
-        }, 200, request);
+      if (url.pathname === '/' || url.pathname === '/diagnostics' || url.pathname === '/health') {
+        return okService(request, env);
       }
 
       if (url.pathname === '/state') {
@@ -469,20 +521,20 @@ export default {
         }, 200, request);
       }
 
-      if (request.method !== 'POST') return json({ ok: true, service: 'astra-worker' }, 200, request);
-      const contentType = request.headers.get('Content-Type') || '';
-      const body = contentType.includes('application/json')
-        ? await request.json()
-        : JSON.parse(await request.text() || '{}');
+      const body = await parseBody(request);
 
       if (url.pathname === '/chat') return handleChat(env, body);
       if (url.pathname === '/vision') return decideVision(env, body);
       if (url.pathname === '/ambient') return handleAmbient(env, body);
       if (url.pathname === '/speak') return handleSpeak(env, body);
 
-      return json({ error: 'Not found' }, 404, request);
+      return json({ error: 'Not found', path: url.pathname }, 404, request);
     } catch (err) {
-      return json({ error: err.message || 'Unknown error' }, 500, request);
+      return json({
+        error: err?.message || 'Unknown error',
+        path: url.pathname,
+        kind: 'worker_runtime_error',
+      }, 500, request);
     }
   },
 };
