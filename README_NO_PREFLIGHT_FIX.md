@@ -1,0 +1,1 @@
+Replace app.js in astra-mobile-app and src/index.js in astra-mobile-worker-src. This switches POST requests to text/plain JSON to avoid preflight/CORS fetch failures on mobile browsers. Commit both, wait for Cloudflare deploy, then reload the site.
