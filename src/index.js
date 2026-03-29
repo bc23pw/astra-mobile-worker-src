@@ -470,7 +470,10 @@ export default {
       }
 
       if (request.method !== 'POST') return json({ ok: true, service: 'astra-worker' }, 200, request);
-      const body = await request.json();
+      const contentType = request.headers.get('Content-Type') || '';
+      const body = contentType.includes('application/json')
+        ? await request.json()
+        : JSON.parse(await request.text() || '{}');
 
       if (url.pathname === '/chat') return handleChat(env, body);
       if (url.pathname === '/vision') return decideVision(env, body);
