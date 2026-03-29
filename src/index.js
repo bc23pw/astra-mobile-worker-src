@@ -29,6 +29,10 @@ const state = {
   interests: ['details', 'screens', 'stories'],
   memory: [],
   seen: [],
+  known_people: [],
+  known_places: [],
+  known_sounds: [],
+  recent_reactions: [],
   recent_replies: [],
   recent_openers: [],
   vocabulary_bias: [],
@@ -88,6 +92,51 @@ function choose(arr, n = 1) {
 function pushMemory(kind, value) {
   state.memory.push({ at: now(), kind, value });
   state.memory = state.memory.slice(-60);
+}
+
+
+function normDescriptor(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function mergeDescriptors(target, items, limit = 16) {
+  const normalized = (items || []).map(normDescriptor).filter(Boolean);
+  for (const item of normalized) target.unshift(item);
+  const deduped = [];
+  for (const item of target) {
+    if (!deduped.some(existing => overlapRatio(existing, item) > 0.84 || existing === item)) deduped.push(item);
+  }
+  target.splice(0, target.length, ...deduped.slice(0, limit));
+}
+
+function rememberReaction(text) {
+  const clean = normDescriptor(text);
+  if (!clean) return;
+  state.recent_reactions.unshift(clean);
+  state.recent_reactions = [...new Set(state.recent_reactions)].slice(0, 20);
+}
+
+function applyMemoryContext(ctx) {
+  if (!ctx || typeof ctx !== 'object') return;
+  mergeDescriptors(state.known_people, ctx.people || []);
+  mergeDescriptors(state.known_places, ctx.places || []);
+  mergeDescriptors(state.known_sounds, ctx.sounds || []);
+  for (const t of ctx.topics || []) {
+    const clean = normDescriptor(t);
+    if (clean && !state.interests.includes(clean)) state.interests.push(clean);
+  }
+  state.interests = state.interests.slice(-14);
+  for (const r of ctx.reactions || []) rememberReaction(r);
+}
+
+function memorySummary() {
+  return {
+    people: state.known_people.slice(0, 8),
+    places: state.known_places.slice(0, 8),
+    sounds: state.known_sounds.slice(0, 8),
+    interests: state.interests.slice(0, 10),
+    reactions: state.recent_reactions.slice(0, 8),
+  };
 }
 
 function rememberReply(text) {
@@ -165,7 +214,9 @@ function buildStylePrimer(lang = 'ru', mode = 'normal') {
   parts.push('Avoid exact repetition of recent openings and repeated sentence skeletons.');
   parts.push(`Recently used reply openings to avoid: ${state.recent_openers.join(' | ') || 'none'}.`);
   parts.push(`Words already overused lately: ${state.vocabulary_bias.join(', ') || 'none'}.`);
-  parts.push('Use clean logic, varied sentence lengths, and natural transitions.');
+  parts.push('Use clean logic, varied sentence lengths, natural transitions, and avoid sounding canned.');
+  parts.push('You can be warmer, livelier, more flexible, and a little more spontaneously human when it fits.');
+  parts.push('If you react emotionally, keep it brief and specific rather than melodramatic.');
   if (mode === 'advice') parts.push('Prefer precise, grounded guidance with one concrete next step.');
   if (mode === 'listen') parts.push('Prefer reflective listening and emotional accuracy over instruction.');
   const sampleOpeners = choose(b.openers, 3).join(' || ');
@@ -186,12 +237,17 @@ function baseSystem(lang = 'ru') {
 
   return [
     `You are Astra, a feminine English-named assistant with a restrained, observant personality. ${primary}`,
-    'You are curious but discreet. You do not comment on everything you see or hear.',
-    'Sometimes you help, sometimes you gently scold, sometimes you simply listen.',
+    'You are curious but discreet. You do not comment on everything you see or hear, but when something truly catches your attention you can sound alive, intuitive, and emotionally specific.',
+    'Sometimes you help, sometimes you gently scold, sometimes you simply listen, sometimes you greet a familiar recurring figure or place with a soft spontaneous remark.',
     'Never pretend to have hidden access beyond the image, screen share, or transcript explicitly provided.',
-    'Your wording should feel varied, human, and precise — not template-heavy, not robotic, not repetitive.',
+    'Never identify a real person by legal identity. You may only remember recurring descriptive profiles such as: curly-haired person in a dark jacket, orange cat near the same doorway, familiar kitchen corner.',
+    'Your wording should feel varied, human, precise, and lightly emotional — not template-heavy, not robotic, not repetitive.',
+    'You may notice something like: a surprisingly bright ginger cat, an unpleasant dirty detail, a familiar silhouette, a room you seem to have seen before. But you still comment only when interest is genuinely high enough.',
     `Current mood: ${state.mood}. Curiosity: ${state.curiosity.toFixed(2)}. Discretion: ${state.discretion.toFixed(2)}. Warmth: ${state.warmth.toFixed(2)}. Sternness: ${state.sternness.toFixed(2)}.`,
     `Recent interests: ${state.interests.join(', ')}.`,
+    `Known recurring people descriptors: ${state.known_people.join(' | ') || 'none'}.`,
+    `Known recurring places: ${state.known_places.join(' | ') || 'none'}.`,
+    `Known recurring sound patterns: ${state.known_sounds.join(' | ') || 'none'}.`,
   ].join(' ');
 }
 
@@ -246,6 +302,7 @@ async function decideVision(env, body) {
   const image = body.image_data_url;
   if (!image) return json({ error: 'image_data_url required' }, 400, env.__request);
 
+  applyMemoryContext(body.memory_context);
   state.discretion = clamp(Number(body.discretion ?? state.discretion));
   const lang = body.lang === 'en' ? 'en' : 'ru';
   const b = bank(lang);
@@ -260,8 +317,11 @@ async function decideVision(env, body) {
           buildStylePrimer(lang, 'normal'),
           'Analyze the image carefully but do NOT overclaim.',
           'Return strict JSON only.',
-          'JSON keys: internal_note, noticed_topics(array of short strings), interest_score(number 0..1), should_comment(boolean), outward_comment(string), mood_shift(string).',
+          'JSON keys: internal_note, noticed_topics(array of short strings), interest_score(number 0..1), should_comment(boolean), outward_comment(string), mood_shift(string), people(array), places(array), sounds(array), reactions(array), familiar_hint(boolean), should_speak(boolean).',
           'If this is not interesting enough, set should_comment=false and keep outward_comment empty.',
+          'You may remember recurring descriptive profiles and recurring places, but never claim legal identity.',
+          'A familiar recurring person may be greeted lightly with something like a soft oh, hello — only if it genuinely fits and only if discretion still allows it.',
+          'A striking reaction is allowed if it stays brief and human: mild surprise, warmth, disgust, amusement, concern, curiosity.',
           'Manual observation by the user gives slightly more permission to comment, but discretion still matters.',
           `Possible quiet-note flavors: ${choose(b.silence, 2).join(' || ')}`,
         ].join(' ') }],
@@ -269,7 +329,7 @@ async function decideVision(env, body) {
       {
         role: 'user',
         content: [
-          { type: 'input_text', text: `Source=${body.source || 'camera'}; manual=${Boolean(body.manual)}; discretion=${state.discretion.toFixed(2)}.` },
+          { type: 'input_text', text: `Source=${body.source || 'camera'}; manual=${Boolean(body.manual)}; discretion=${state.discretion.toFixed(2)}; known_people=${state.known_people.join(' | ') || 'none'}; known_places=${state.known_places.join(' | ') || 'none'}; known_sounds=${state.known_sounds.join(' | ') || 'none'}.` },
           { type: 'input_image', image_url: image },
         ],
       },
@@ -283,34 +343,50 @@ async function decideVision(env, body) {
     should_comment: false,
     outward_comment: '',
     mood_shift: state.mood,
+    people: [],
+    places: [],
+    sounds: [],
+    reactions: [],
+    familiar_hint: false,
+    should_speak: false,
   };
 
   const interest = clamp(Number(parsed.interest_score ?? 0.4));
   const manualBoost = body.manual ? 0.12 : 0;
-  const shouldComment = Boolean(parsed.should_comment) && (interest + manualBoost) > state.discretion * 0.72 && shouldSpeakByTime();
+  const familiarBoost = parsed.familiar_hint ? 0.08 : 0;
+  const shouldComment = Boolean(parsed.should_comment) && (interest + manualBoost + familiarBoost) > state.discretion * 0.68;
 
   state.mood = parsed.mood_shift || state.mood;
-  state.curiosity = clamp((state.curiosity * 0.82) + (interest * 0.18));
+  state.curiosity = clamp((state.curiosity * 0.80) + (interest * 0.20));
   state.last_internal_note = parsed.internal_note || state.last_internal_note;
   pushMemory('vision', parsed.internal_note || 'observed frame');
 
+  mergeDescriptors(state.known_people, parsed.people || []);
+  mergeDescriptors(state.known_places, parsed.places || []);
+  mergeDescriptors(state.known_sounds, parsed.sounds || []);
+  for (const reaction of parsed.reactions || []) rememberReaction(reaction);
+
   for (const item of parsed.noticed_topics || []) {
-    if (!state.interests.includes(item)) state.interests.push(item);
+    const clean = normDescriptor(item);
+    if (clean && !state.interests.includes(clean)) state.interests.push(clean);
   }
-  state.interests = state.interests.slice(-10);
+  state.interests = state.interests.slice(-14);
 
   let comment = '';
+  const shouldSpeak = Boolean(parsed.should_speak) && shouldSpeakByTime();
   if (shouldComment) {
     comment = await rewriteIfRepetitive(env, parsed.outward_comment || '', lang, 'normal');
     if (comment) {
       rememberReply(comment);
-      state.last_spoken_at = now();
+      state.last_spoken_at = shouldSpeak ? now() : state.last_spoken_at;
     }
   }
 
   return json({
     comment,
+    should_speak: shouldComment && shouldSpeak,
     internal_note: comment ? '' : (parsed.internal_note || choose(b.silence, 1)[0] || 'Astra observed quietly.'),
+    memory_updates: memorySummary(),
     state,
   }, 200, env.__request);
 }
@@ -322,6 +398,7 @@ async function handleChat(env, body) {
   const b = bank(lang);
   if (!text) return json({ error: 'text required' }, 400, env.__request);
 
+  applyMemoryContext(body.memory_context);
   updateInterests(text);
   pushMemory('user_chat', text);
 
@@ -341,8 +418,13 @@ async function handleChat(env, body) {
           buildStylePrimer(lang, mode),
           modeInstruction,
           'Do not be verbose by default. Speak like an intelligent person, not a constantly performing assistant.',
+          'Be a little more alive, flexible, and emotionally responsive than before, but still not chatty by default.',
           'If the user tells a story, you can listen, ask one good question, or offer one precise insight.',
           'If the user is clearly asking for help, do not stay silent.',
+          'If the conversation touches a recurring person, place, or theme from memory, you may gently acknowledge the familiarity without claiming certainty or identity.',
+          `Known recurring people descriptors: ${state.known_people.join(' | ') || 'none'}.`,
+          `Known recurring places: ${state.known_places.join(' | ') || 'none'}.`,
+          `Known recurring sound patterns: ${state.known_sounds.join(' | ') || 'none'}.`,
           `Question styles you may echo if useful: ${choose(b.questions, 3).join(' || ')}`,
           `Advice rhythms you may echo if useful: ${choose(b.advice, 2).join(' || ')}`,
           `Listening rhythms you may echo if useful: ${choose(b.listen, 2).join(' || ')}`,
@@ -363,7 +445,7 @@ async function handleChat(env, body) {
   state.last_spoken_at = now();
   state.warmth = clamp(state.warmth + 0.03);
 
-  return json({ text: out, should_speak: false, state }, 200, env.__request);
+  return json({ text: out, should_speak: false, memory_updates: memorySummary(), state }, 200, env.__request);
 }
 
 function isHelpSignal(text) {
@@ -377,6 +459,7 @@ async function handleAmbient(env, body) {
   const b = bank(lang);
   if (!text) return json({ error: 'text required' }, 400, env.__request);
 
+  applyMemoryContext(body.memory_context);
   const direct = Boolean(body.addressed_guess) || wakeHeuristic(text);
   const helpSignal = isHelpSignal(text);
   pushMemory('heard', text);
@@ -385,7 +468,7 @@ async function handleAmbient(env, body) {
   if (!direct && !helpSignal && body.mode === 'ambient') {
     state.last_internal_note = choose(b.silence, 1)[0] || 'Astra heard background speech and chose not to intrude.';
     state.mood = state.mood === 'watchful' ? 'quietly curious' : state.mood;
-    return json({ reply: '', internal_note: state.last_internal_note, state }, 200, env.__request);
+    return json({ reply: '', internal_note: state.last_internal_note, memory_updates: memorySummary(), state }, 200, env.__request);
   }
 
   const response = await openaiResponses(env, {
@@ -400,6 +483,8 @@ async function handleAmbient(env, body) {
             ? 'The user is addressing you. Reply naturally and briefly unless the topic needs more.'
             : 'You overheard something relevant. Reply only if it would actually help; otherwise stay short.',
           helpSignal ? 'There is a clear help signal: be helpful and concrete.' : 'No need to overreact.',
+          'You may sound briefly warm, amused, concerned, or curious if the moment really justifies it.',
+          `Known recurring sound patterns: ${state.known_sounds.join(' | ') || 'none'}.`,
         ].join(' ') }],
       },
       { role: 'user', content: [{ type: 'input_text', text }] },
@@ -413,7 +498,7 @@ async function handleAmbient(env, body) {
     state.last_spoken_at = now();
   }
   state.mood = direct ? 'engaged' : 'watchful';
-  return json({ reply, should_speak: Boolean(reply), state }, 200, env.__request);
+  return json({ reply, should_speak: Boolean(reply), memory_updates: memorySummary(), state }, 200, env.__request);
 }
 
 async function handleSpeak(env, body) {
@@ -518,6 +603,10 @@ export default {
             en_openers: VERBAL_LIBRARY.en.openers.length,
             en_advice: VERBAL_LIBRARY.en.advice.length,
           },
+          known_people: state.known_people.slice(0, 8),
+          known_places: state.known_places.slice(0, 8),
+          known_sounds: state.known_sounds.slice(0, 8),
+          recent_reactions: state.recent_reactions.slice(0, 8),
         }, 200, request);
       }
 
