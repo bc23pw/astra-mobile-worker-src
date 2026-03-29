@@ -1,0 +1,1 @@
+Replace src/index.js in astra-mobile-worker-src with this file, commit, then wait for Cloudflare Builds.
